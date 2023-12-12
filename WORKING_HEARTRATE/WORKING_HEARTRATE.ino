@@ -1,30 +1,41 @@
-/**
- * A BLE client that connectes to and streams live heartrate data from a wahoo tickr
- * Daniel's awesome work below :)
- */
-
 #include "BLEDevice.h"
 
-// The remote service we wish to connect to.
-static BLEUUID serviceUUID("0000180d-0000-1000-8000-00805f9b34fb");
-// The characteristic of the remote service we are interested in.
-static BLEUUID charUUID(BLEUUID((uint16_t)0x2A37));
+// UUIDs for Heart Rate Monitor
+static BLEUUID serviceUUID_HRM("0000180d-0000-1000-8000-00805f9b34fb"); // Heart Rate Service UUID
+static BLEUUID charUUID_HRM(BLEUUID((uint16_t)0x2A37)); // Heart Rate Measurement Characteristic UUID
+
+// UUIDs for Power Meter
+static BLEUUID serviceUUID_Power("00001818-0000-1000-8000-00805f9b34fb"); // Power Service UUID
+static BLEUUID charUUID_Power(BLEUUID((uint16_t)0x2A63)); // Power Measurement Characteristic UUID
 
 static boolean doConnect = false;
-static boolean connected = false;
-static boolean doScan = false;
-static BLERemoteCharacteristic* pRemoteCharacteristic;
-static BLEAdvertisedDevice* myDevice;
-static std::string connectedDeviceAddress = "ef:e2:0c:b6:4b:a8";
-static void notifyCallback(
+static BLERemoteCharacteristic* pRemoteCharacteristic_HRM;
+static BLERemoteCharacteristic* pRemoteCharacteristic_Power;
+static BLEAdvertisedDevice* myDevice_HRM;
+static BLEAdvertisedDevice* myDevice_Power;
+
+static void notifyCallback_HRM(
   BLERemoteCharacteristic* pBLERemoteCharacteristic,
   uint8_t* pData,
   size_t length,
   bool isNotify) {
   int BPM = pData[1];
-  Serial.print("Heart Rate :");
+  Serial.print("Heart Rate: ");
   Serial.print(BPM);
-  Serial.println("BPM");
+  Serial.println(" BPM");
+}
+
+static void notifyCallback_Power(
+  BLERemoteCharacteristic* pBLERemoteCharacteristic,
+  uint8_t* pData,
+  size_t length,
+  bool isNotify) {
+  if (length >= 4) {
+    int instantPower = pData[2] | (pData[3] << 8);
+    Serial.print("Instant Power: ");
+    Serial.print(instantPower);
+    Serial.println(" Watts");
+  }
 }
 
 class MyClientCallback : public BLEClientCallbacks {
@@ -32,125 +43,74 @@ class MyClientCallback : public BLEClientCallbacks {
   }
 
   void onDisconnect(BLEClient* pclient) {
-    connected = false;
-    Serial.println("onDisconnect");
+    Serial.println("Disconnected");
   }
 };
 
-bool connectToServer() {
-  Serial.print("Forming a connection to ");
+bool connectToServer(BLEAdvertisedDevice* myDevice, BLERemoteCharacteristic** pRemoteCharacteristic, BLEUUID serviceUUID, BLEUUID charUUID, void (*notifyCallback)(BLERemoteCharacteristic*, uint8_t*, size_t, bool)) {
+  Serial.print("Connecting to ");
   Serial.println(myDevice->getAddress().toString().c_str());
 
   BLEClient* pClient = BLEDevice::createClient();
-
   pClient->setClientCallbacks(new MyClientCallback());
+  pClient->connect(myDevice);
 
-  // Connect to the remove BLE Server.
-  pClient->connect(myDevice);  // If you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
-
-  // Store the address of the connected device
-  if (pClient->isConnected()) {
-    connectedDeviceAddress = myDevice->getAddress().toString();
-    connected = true;
-  } else {
-    connected = false;
-    return false;
-  }
-
-  pClient->setMTU(517);  // Set client to request maximum MTU from server (default is 23 otherwise)
-
-  // Obtain a reference to the service we are after in the remote BLE server.
   BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
   if (pRemoteService == nullptr) {
-    Serial.print("Failed to find our service UUID: ");
-    Serial.println(serviceUUID.toString().c_str());
+    Serial.println("Failed to find service UUID");
     pClient->disconnect();
     return false;
   }
 
-  // Obtain a reference to the characteristic in the service of the remote BLE server.
-  pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
-  if (pRemoteCharacteristic == nullptr) {
-    Serial.print("Failed to find our characteristic UUID: ");
-    Serial.println(charUUID.toString().c_str());
+  *pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+  if (*pRemoteCharacteristic == nullptr) {
+    Serial.println("Failed to find characteristic UUID");
     pClient->disconnect();
     return false;
   }
 
-  // Read the value of the characteristic.
-  if (pRemoteCharacteristic->canRead()) {
-    std::string value = pRemoteCharacteristic->readValue();
+  if ((*pRemoteCharacteristic)->canNotify()) {
+    (*pRemoteCharacteristic)->registerForNotify(notifyCallback);
   }
-
-  if (pRemoteCharacteristic->canNotify())
-    pRemoteCharacteristic->registerForNotify(notifyCallback);
 
   return true;
 }
 
-/**
- * Scan for BLE servers and find the first one that advertises the service we are looking for.
- */
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
-  /**
-   * Called for each advertising BLE server.
-   */
   void onResult(BLEAdvertisedDevice advertisedDevice) {
-    // We have found a device, let us now see if it contains the service we are looking for.
-    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
-      Serial.print("BLE Advertised Device found: ");
-      Serial.println(advertisedDevice.toString().c_str());
-      Serial.println("Found Heart Rate Service");
-      BLEDevice::getScan()->stop();
-      myDevice = new BLEAdvertisedDevice(advertisedDevice);
+    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID_HRM)) {
+      Serial.println("Found Heart Rate Monitor");
+      myDevice_HRM = new BLEAdvertisedDevice(advertisedDevice);
       doConnect = true;
-      doScan = false;
-    } else {
-
-    }  // Found our server
-  }    // onResult
-};     // MyAdvertisedDeviceCallbacks
-bool isConnectedToSpecificDevice(const std::string& specificDeviceAddress) {
-  return connected && (connectedDeviceAddress == specificDeviceAddress);
-}
+    } else if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID_Power)) {
+      Serial.println("Found Power Meter");
+      myDevice_Power = new BLEAdvertisedDevice(advertisedDevice);
+      doConnect = true;
+    }
+  }
+};
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Starting the Heart rate Program");
+  Serial.println("Starting BLE Client");
   BLEDevice::init("");
-
 
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setInterval(1349);
-  pBLEScan->setWindow(449);
   pBLEScan->setActiveScan(true);
-  pBLEScan->start(25, false);
+  pBLEScan->start(30, false);
 }
 
-
-
 void loop() {
-
-  // If the flag "doConnect" is true then we have scanned for and found the desired
-  // BLE Server with which we wish to connect.  Now we connect to it.  Once we are
-  // connected we set the connected flag to be true.
   if (doConnect) {
-    if (connectToServer()) {
-      Serial.println("We are now connected to the BLE Server.");
-    } else {
-      Serial.println("We have failed to connect to the server; there is nothin more we will do.");
+    if (myDevice_HRM != nullptr) {
+      connectToServer(myDevice_HRM, &pRemoteCharacteristic_HRM, serviceUUID_HRM, charUUID_HRM, notifyCallback_HRM);
+    }
+    if (myDevice_Power != nullptr) {
+      connectToServer(myDevice_Power, &pRemoteCharacteristic_Power, serviceUUID_Power, charUUID_Power, notifyCallback_Power);
     }
     doConnect = false;
   }
 
-  // If we are connected to a peer BLE Server, update the characteristic each time we are reached
-  // with the current time since boot.
-  if (connected) {
-    // Set the characteristic's value to be the array of bytes that is actually a string.
-  } else if (doScan) {
-    BLEDevice::getScan()->start(0);  // this is just example to start scan after disconnect, most likely there is better way to do it in arduino
-  }
-
-  delay(500);  // Delay a second between loops.
-}  // End of loop
+  delay(1000);
+}
